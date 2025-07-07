@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CLOSE_SUM, DROP_PERCENT, CALL_PEOPLE = range(3)
+CLOSE_SUM, CHOOSE_RATE, MANUAL_RATE, DROP_PERCENT, CALL_PEOPLE = range(5)
 
 _cached_usd = None
 _cached_date = None
@@ -45,17 +45,53 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def get_close_sum(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         rub = float(update.message.text.replace(",", "."))
+        ctx.user_data["rub"] = rub
     except ValueError:
         await update.message.reply_text("❌ Введите корректную сумму:")
         return CLOSE_SUM
-    rate = get_usd_rate()
-    usd = rub / rate
-    ctx.user_data.update({"usd": usd, "rate": rate})
-    await update.message.reply_text(
-        f"🔄 Курс ЦБ РФ: 1 $ = {rate:.2f} ₽\n"
-        f"💵 Это: {usd:.2f}$\n\n"
-        "Введите процент дропа (например, 25):"
+
+    keyboard = ReplyKeyboardMarkup(
+        [["📈 Курс ЦБ", "✏️ Ввести вручную"]],
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
+    await update.message.reply_text("💱 По какому курсу считать доллар?", reply_markup=keyboard)
+    return CHOOSE_RATE
+
+
+async def use_cbr_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    rate = get_usd_rate()
+    rub = ctx.user_data["rub"]
+    usd = rub / rate
+    ctx.user_data.update({"rate": rate, "usd": usd})
+    await update.message.reply_text(
+        f"📈 Курс ЦБ РФ: 1 $ = {rate:.2f} ₽\n"
+        f"💵 Это: {usd:.2f}$\n\n"
+        f"Введите процент дропа:"
+    )
+
+    return DROP_PERCENT
+
+
+async def ask_manual_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✏️ Введите курс доллара вручную (например: 87.52):")
+    return MANUAL_RATE
+
+
+async def set_manual_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        rate = float(update.message.text.replace(",", "."))
+    except:
+        await update.message.reply_text("❌ Введите корректный курс:")
+        return MANUAL_RATE
+
+    rub = ctx.user_data["rub"]
+    usd = rub / rate
+    ctx.user_data.update({"rate": rate, "usd": usd})
+    await update.message.reply_text(
+        f"✅ Курс установлен: 1 $ = {rate:.2f} ₽\nВведите процент дропа:"
+    )
+
     return DROP_PERCENT
 
 
@@ -67,12 +103,12 @@ async def get_drop_percent(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return DROP_PERCENT
     usd = ctx.user_data["usd"]
     after_drop = usd * (1 - drop / 100)
-    ctx.user_data["drop"] = drop
-    ctx.user_data["after_drop"] = after_drop
+    ctx.user_data.update({"drop": drop, "after_drop": after_drop})
     await update.message.reply_text(
         f"📉 После дропа на {drop:.1f}%: {after_drop:.2f}$\n"
         "Сколько человек было в трубке? (целое число)"
     )
+
     return CALL_PEOPLE
 
 
@@ -94,31 +130,23 @@ async def get_call_people(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"• Людей: {ppl}\n"
         f"• Твой заработок: {per_person:.2f}$ (~{rub_earned:.2f}₽)"
     )
+
     if per_person < 30:
         result += "\n\n🤡 Это всё? Пора в найм!"
     elif per_person > 100:
         result += "\n\n🤑 Ты просто король звонка!"
+
     keyboard = ReplyKeyboardMarkup(
-        [["🔁 Новый расчёт", "📈 Узнать курс"]],
-        one_time_keyboard=True,
+        [["/start"]],
         resize_keyboard=True
     )
     await update.message.reply_text(result, reply_markup=keyboard)
     return ConversationHandler.END
 
 
-async def show_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    rate = get_usd_rate()
-    await update.message.reply_text(f"📈 Актуальный курс доллара: {rate:.2f} ₽")
-
-
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Расчёт отменён.")
     return ConversationHandler.END
-
-
-async def restart_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    return await start(update, ctx)
 
 
 def main():
@@ -129,25 +157,21 @@ def main():
         entry_points=[CommandHandler("start", start)],
         states={
             CLOSE_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_close_sum)],
+            CHOOSE_RATE: [
+                MessageHandler(filters.Regex("^📈 Курс ЦБ$"), use_cbr_rate),
+                MessageHandler(filters.Regex(
+                    "^✏️ Ввести вручную$"), ask_manual_rate)
+            ],
+            MANUAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_manual_rate)],
             DROP_PERCENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_drop_percent)],
             CALL_PEOPLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_call_people)],
         },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            MessageHandler(filters.Regex(
-                "(?i)^.*нов.*расч.*$"), restart_handler)
-        ],
+        fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True
     )
 
     app.add_handler(conv)
     app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(MessageHandler(
-        filters.Regex("^📈 Узнать курс$"), show_rate))
-    app.add_handler(MessageHandler(
-        filters.Regex("(?i)^.*нов.*расч.*$"),
-        restart_handler
-    ))
 
     logger.info("Бот запущен")
     app.run_polling()
